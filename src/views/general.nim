@@ -128,7 +128,7 @@ proc renderMain*(body: VNode; req: Request; cfg: Config; prefs=defaultPrefs;
   let canonical = getTwitterLink(req.path, req.params)
 
   let node = buildHtml(html(lang="en")):
-    renderHead(prefs, cfg, req, titleText, desc, video, images, banner, ogTitle,
+    renderHead(prefs, cfg, req, titleText, desc, getUrlPrefix(cfg) & getVidUrl(video), images, banner, ogTitle,
                rss, canonical)
 
     body:

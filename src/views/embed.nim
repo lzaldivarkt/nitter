@@ -3,7 +3,7 @@ import options
 import karax/[karaxdsl, vdom]
 from jester import Request
 
-import ".."/[types, formatters]
+import ".."/[types, utils, formatters]
 import general, tweet
 
 const doctype = "<!DOCTYPE html>\n"
@@ -13,7 +13,7 @@ proc renderVideoEmbed*(tweet: Tweet; cfg: Config; req: Request): string =
   let vidUrl = getVideoEmbed(cfg, tweet.id)
   let prefs = Prefs(hlsPlayback: true, mp4Playback: true)
   let node = buildHtml(html(lang="en")):
-    renderHead(prefs, cfg, req, video=vidUrl, images=(@[thumb]))
+    renderHead(prefs, cfg, req, video=getVidUrl(vidUrl), images=(@[thumb]))
 
     body:
       tdiv(class="embed-video"):
