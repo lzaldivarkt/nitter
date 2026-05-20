@@ -17,7 +17,7 @@ let
   unReplace = "$1<a href=\"/$2\">@$2</a>"
 
   htRegex = re"(^|[^\w-_./?])([#$]|＃)([\w_]+)"
-  htReplace = "$1<a href=\"/search?q=%23$3\">$2$3</a>"
+  htReplace = "$1<a href=\"/search?f=tweets&q=%23$3\">$2$3</a>"
 
 type
   ReplaceSliceKind = enum
@@ -36,6 +36,12 @@ template `?`*(js: JsonNode): untyped =
   if j.isNull: return
   j
 
+template select*(a, b: JsonNode): untyped =
+  if a.notNull: a else: b
+
+template select*(a, b, c: JsonNode): untyped =
+  if a.notNull: a elif b.notNull: b else: c
+
 template with*(ident, value, body): untyped =
   if true:
     let ident {.inject.} = value
@@ -44,8 +50,7 @@ template with*(ident, value, body): untyped =
 template with*(ident; value: JsonNode; body): untyped =
   if true:
     let ident {.inject.} = value
-    # value.notNull causes a compilation error for versions < 1.6.14
-    if notNull(value): body
+    if value.notNull: body
 
 template getCursor*(js: JsonNode): string =
   js{"content", "operation", "cursor", "value"}.getStr
@@ -53,6 +58,19 @@ template getCursor*(js: JsonNode): string =
 template getError*(js: JsonNode): Error =
   if js.kind != JArray or js.len == 0: null
   else: Error(js[0]{"code"}.getInt)
+
+proc getTweetResult*(js: JsonNode; root="content"): JsonNode =
+  select(
+    js{root, "content", "tweet_results", "result"},
+    js{root, "itemContent", "tweet_results", "result"},
+    js{root, "content", "tweetResult", "result"}
+  )
+
+template getTypeName*(js: JsonNode): string =
+  js{"__typename"}.getStr(js{"type"}.getStr)
+
+template getEntryId*(e: JsonNode): string =
+  e{"entryId"}.getStr(e{"entry_id"}.getStr)
 
 template parseTime(time: string; f: static string; flen: int): DateTime =
   if time.len != flen: return
@@ -64,28 +82,31 @@ proc getDateTime*(js: JsonNode): DateTime =
 proc getTime*(js: JsonNode): DateTime =
   parseTime(js.getStr, "ddd MMM dd hh:mm:ss \'+0000\' yyyy", 30)
 
-proc getId*(id: string): string {.inline.} =
+proc getTimeFromMs*(js: JsonNode): DateTime =
+  let ms = js.getInt(0)
+  if ms == 0: return
+  let seconds = ms div 1000
+  return fromUnix(seconds).utc()
+
+proc getTimeFromMsStr*(js: JsonNode): DateTime =
+  var ms: int64
+  try: ms = parseBiggestInt(js.getStr("0"))
+  except ValueError: return
+  if ms == 0: return
+  let seconds = ms div 1000
+  return fromUnix(seconds).utc()
+
+proc getId*(id: string): int64 {.inline.} =
   let start = id.rfind("-")
-  if start < 0: return id
-  id[start + 1 ..< id.len]
+  if start < 0:
+    return parseBiggestInt(id)
+  return parseBiggestInt(id[start + 1 ..< id.len])
 
 proc getId*(js: JsonNode): int64 {.inline.} =
   case js.kind
-  of JString: return parseBiggestInt(js.getStr("0"))
+  of JString: return js.getStr("0").getId
   of JInt: return js.getBiggestInt()
   else: return 0
-
-proc getEntryId*(js: JsonNode): string {.inline.} =
-  let entry = js{"entryId"}.getStr
-  if entry.len == 0: return
-
-  if "tweet" in entry or "sq-I-t" in entry:
-    return entry.getId
-  elif "tombstone" in entry:
-    return js{"content", "item", "content", "tombstone", "tweet", "id"}.getStr
-  else:
-    echo "unknown entry: ", entry
-    return
 
 template getStrVal*(js: JsonNode; default=""): string =
   js{"string_value"}.getStr(default)
@@ -97,6 +118,9 @@ proc getImageStr*(js: JsonNode): string =
 
 template getImageVal*(js: JsonNode): string =
   js{"image_value", "url"}.getImageStr
+
+template getExpandedUrl*(js: JsonNode; fallback=""): string =
+  js{"expanded_url"}.getStr(js{"url"}.getStr(fallback))
 
 proc getCardUrl*(js: JsonNode; kind: CardKind): string =
   result = js{"website_url"}.getStrVal
@@ -157,19 +181,13 @@ proc getMp4Resolution*(url: string): int =
     # cannot determine resolution (e.g. m3u8/non-mp4 video)
     return 0
 
-proc getVideoViewCount*(js: JsonNode): string =
-  with stats, js{"ext_media_stats"}:
-    return stats{"view_count"}.getStr($stats{"viewCount"}.getInt)
-
-  return $js{"mediaStats", "viewCount"}.getInt(0)
-
 proc extractSlice(js: JsonNode): Slice[int] =
   result = js["indices"][0].getInt ..< js["indices"][1].getInt
 
 proc extractUrls(result: var seq[ReplaceSlice]; js: JsonNode;
                  textLen: int; hideTwitter = false) =
   let
-    url = js["expanded_url"].getStr
+    url = js.getExpandedUrl
     slice = js.extractSlice
 
   if hideTwitter and slice.b.succ >= textLen and url.isTwitterUrl:
@@ -196,7 +214,7 @@ proc replacedWith(runes: seq[Rune]; repls: openArray[ReplaceSlice];
       let
         name = $runes[rep.slice.a.succ .. rep.slice.b]
         symbol = $runes[rep.slice.a]
-      result.add a(symbol & name, href = "/search?q=%23" & name)
+      result.add a(symbol & name, href = "/search?f=tweets&q=%23" & name)
     of rkMention:
       result.add a($runes[rep.slice], href = rep.url, title = rep.display)
     of rkUrl:
@@ -230,7 +248,7 @@ proc expandUserEntities*(user: var User; js: JsonNode) =
     ent = ? js{"entities"}
 
   with urls, ent{"url", "urls"}:
-    user.website = urls[0]{"expanded_url"}.getStr
+    user.website = urls[0].getExpandedUrl
 
   var replacements = newSeq[ReplaceSlice]()
 
@@ -260,7 +278,7 @@ proc expandTextEntities(tweet: Tweet; entities: JsonNode; text: string; textSlic
       replacements.extractUrls(u, textSlice.b, hideTwitter = hasRedundantLink)
 
       if hasCard and u{"url"}.getStr == get(tweet.card).url:
-        get(tweet.card).url = u{"expanded_url"}.getStr
+        get(tweet.card).url = u.getExpandedUrl
 
   with media, entities{"media"}:
     for m in media:
@@ -310,6 +328,58 @@ proc expandTweetEntities*(tweet: Tweet; js: JsonNode) =
 
   tweet.expandTextEntities(entities, tweet.text, textSlice, replyTo, hasQuote or hasJobCard)
 
+proc expandTextEntitiesV2(tweet: Tweet; js: JsonNode; text: string; textSlice: Slice[int];
+                          hasRedundantLink=false) =
+  let hasCard = tweet.card.isSome
+
+  var replacements = newSeq[ReplaceSlice]()
+
+  with urls, js{"url_entities"}:
+    for u in urls:
+      let urlStr = u["url"].getStr
+      if urlStr.len == 0 or urlStr notin text:
+        continue
+
+      replacements.extractUrls(u, textSlice.b, hideTwitter = hasRedundantLink)
+
+      if hasCard and u{"url"}.getStr == get(tweet.card).url:
+        get(tweet.card).url = u.getExpandedUrl
+
+  with hashtags, js{"details", "hashtag_entities"}:
+    for hashtag in hashtags:
+      replacements.extractHashtags(hashtag)
+
+  with cashtags, js{"details", "cashtag_entities"}:
+    for cashtag in cashtags:
+      replacements.extractHashtags(cashtag)
+
+  with mentions, js{"mention_entities"}:
+    for mention in mentions:
+      let
+        name = mention{"screen_name"}.getStr
+        slice = mention.extractSlice
+        idx = tweet.reply.find(name)
+
+      if slice.a >= textSlice.a:
+        replacements.add ReplaceSlice(kind: rkMention, slice: slice,
+          url: "/" & name, display: mention["name"].getStr)
+      elif idx == -1 and tweet.replyId != 0:
+        tweet.reply.add name
+
+  replacements.deduplicate
+  replacements.sort(cmp)
+
+  tweet.text = text.toRunes.replacedWith(replacements, textSlice).strip(leading=false)
+
+proc expandTweetEntitiesV2*(tweet: Tweet; js: JsonNode) =
+  let
+    textRange = js{"details", "display_text_range"}
+    textSlice = textRange{0}.getInt .. textRange{1}.getInt
+    hasQuote = "quoted_tweet_results" in js
+    hasJobCard = tweet.card.isSome and get(tweet.card).kind == jobDetails
+
+  tweet.expandTextEntitiesV2(js, tweet.text, textSlice, hasQuote or hasJobCard)
+
 proc expandNoteTweetEntities*(tweet: Tweet; js: JsonNode) =
   let
     entities = ? js{"entity_set"}
@@ -319,3 +389,31 @@ proc expandNoteTweetEntities*(tweet: Tweet; js: JsonNode) =
   tweet.expandTextEntities(entities, text, textSlice)
 
   tweet.text = tweet.text.multiReplace((unicodeOpen, xmlOpen), (unicodeClose, xmlClose))
+
+proc expandBirdwatchEntities*(text: string; entities: JsonNode): string =
+  let runes = text.toRunes
+  var replacements: seq[ReplaceSlice]
+
+  for entity in entities:
+    let
+      fromIdx = entity{"from_index"}.getInt
+      toIdx = entity{"to_index"}.getInt
+      url = entity{"ref", "url"}.getStr
+    if url.len > 0:
+      replacements.add ReplaceSlice(
+        kind: rkUrl,
+        slice: fromIdx ..< toIdx,
+        url: url,
+        display: $runes[fromIdx ..< min(toIdx, runes.len)]
+      )
+
+  replacements.sort(cmp)
+  result = runes.replacedWith(replacements, 0 ..< runes.len)
+
+proc extractGalleryPhoto*(t: Tweet): GalleryPhoto =
+  let url =
+    if t.media.len > 0: t.media[0].getThumb
+    elif t.card.isSome: get(t.card).image
+    else: ""
+
+  result = GalleryPhoto(url: url, tweetId: $t.id)

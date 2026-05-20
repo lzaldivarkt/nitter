@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import strutils, strformat, sequtils, tables, uri
 
-import types
+import types, utils
 
 const
   validFilters* = @[
     "media", "images", "twimg", "videos",
-    "native_video", "consumer_video", "pro_video",
+    "native_video", "consumer_video", "spaces",
     "links", "news", "quote", "mentions",
-    "replies", "retweets", "nativeretweets",
-    "verified", "safe"
+    "replies", "retweets", "nativeretweets"
   ]
 
   emptyQuery* = "include:nativeretweets"
@@ -21,12 +20,13 @@ template `@`(param: string): untyped =
 proc initQuery*(pms: Table[string, string]; name=""): Query =
   result = Query(
     kind: parseEnum[QueryKind](@"f", tweets),
+    view: @"view",
     text: @"q",
     filters: validFilters.filterIt("f-" & it in pms),
     excludes: validFilters.filterIt("e-" & it in pms),
     since: @"since",
     until: @"until",
-    near: @"near"
+    minLikes: validateNumber(@"min_faves")
   )
 
   if name.len > 0:
@@ -46,7 +46,7 @@ proc getReplyQuery*(name: string): Query =
     fromUser: @[name]
   )
 
-proc genQueryParam*(query: Query): string =
+proc genQueryParam*(query: Query; maxId=""): string =
   var
     filters: seq[string]
     param: string
@@ -55,15 +55,20 @@ proc genQueryParam*(query: Query): string =
     return query.text
 
   for i, user in query.fromUser:
-    param &= &"from:{user} "
+    if i == 0:
+      param = "("
+
+    param &= &"from:{user}"
     if i < query.fromUser.high:
-      param &= "OR "
+      param &= " OR "
+    else:
+      param &= ")"
 
   if query.fromUser.len > 0 and query.kind in {posts, media}:
-    param &= "filter:self_threads OR -filter:replies "
+    param &= " (filter:self_threads OR -filter:replies)"
 
   if "nativeretweets" notin query.excludes:
-    param &= "include:nativeretweets "
+    param &= " include:nativeretweets"
 
   for f in query.filters:
     filters.add "filter:" & f
@@ -73,38 +78,49 @@ proc genQueryParam*(query: Query): string =
   for i in query.includes:
     filters.add "include:" & i
 
-  result = strip(param & filters.join(&" {query.sep} "))
+  if filters.len > 0:
+    result = strip(param & " (" & filters.join(&" {query.sep} ") & ")")
+  else:
+    result = strip(param)
+
   if query.since.len > 0:
     result &= " since:" & query.since
-  if query.until.len > 0:
+  if query.until.len > 0 and maxId.len == 0:
     result &= " until:" & query.until
-  if query.near.len > 0:
-    result &= &" near:\"{query.near}\" within:15mi"
+  if query.minLikes.len > 0:
+    result &= " min_faves:" & query.minLikes
   if query.text.len > 0:
     if result.len > 0:
       result &= " " & query.text
     else:
       result = query.text
 
+  if result.len > 0 and maxId.len > 0:
+    result &= " max_id:" & maxId
+
 proc genQueryUrl*(query: Query): string =
-  if query.kind notin {tweets, users}: return
+  var params: seq[string]
 
-  var params = @[&"f={query.kind}"]
-  if query.text.len > 0:
-    params.add "q=" & encodeUrl(query.text)
-  for f in query.filters:
-    params.add &"f-{f}=on"
-  for e in query.excludes:
-    params.add &"e-{e}=on"
-  for i in query.includes.filterIt(it != "nativeretweets"):
-    params.add &"i-{i}=on"
+  if query.view.len > 0:
+    params.add "view=" & encodeUrl(query.view)
 
-  if query.since.len > 0:
-    params.add "since=" & query.since
-  if query.until.len > 0:
-    params.add "until=" & query.until
-  if query.near.len > 0:
-    params.add "near=" & query.near
+  if query.kind in {tweets, users}:
+    params.add &"f={query.kind}"
+    if query.text.len > 0:
+      params.add "q=" & encodeUrl(query.text)
+    for f in query.filters:
+      params.add &"f-{f}=on"
+    for e in query.excludes:
+      params.add &"e-{e}=on"
+    for i in query.includes.filterIt(it != "nativeretweets"):
+      params.add &"i-{i}=on"
+
+    if query.since.len > 0:
+      params.add "since=" & query.since
+    if query.until.len > 0:
+      params.add "until=" & query.until
+    if query.minLikes.len > 0:
+      params.add "min_faves=" & query.minLikes
 
   if params.len > 0:
     result &= params.join("&")

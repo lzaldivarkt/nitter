@@ -10,7 +10,7 @@ bin           = @["nitter"]
 
 # Dependencies
 
-requires "nim >= 1.6.10"
+requires "nim >= 2.0.0"
 requires "jester#baca3f"
 requires "karax#5cf360c"
 requires "sass#7dfdd03"
@@ -28,7 +28,7 @@ requires "oauth#b8c163b"
 # Tasks
 
 task scss, "Generate css":
-  exec "nimble c --hint[Processing]:off -d:danger -r tools/gencss"
+  exec "nim r --hint[Processing]:off tools/gencss"
 
 task md, "Render md":
-  exec "nimble c --hint[Processing]:off -d:danger -r tools/rendermd"
+  exec "nim r --hint[Processing]:off tools/rendermd"

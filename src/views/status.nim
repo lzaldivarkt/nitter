@@ -28,14 +28,19 @@ proc renderReplyThread(thread: Chain; prefs: Prefs; path: string): VNode =
     if thread.hasMore:
       renderMoreReplies(thread)
 
-proc renderReplies*(replies: Result[Chain]; prefs: Prefs; path: string): VNode =
+proc renderReplies*(replies: Result[Chain]; prefs: Prefs; path: string; tweet: Tweet = nil): VNode =
   buildHtml(tdiv(class="replies", id="r")):
+    var hasReplies = false
+    var replyCount = 0
     for thread in replies.content:
       if thread.content.len == 0: continue
+      hasReplies = true
+      replyCount += thread.content.len
       renderReplyThread(thread, prefs, path)
 
-    if replies.bottom.len > 0:
-      renderMore(Query(), replies.bottom, focus="#r")
+    if hasReplies and replies.bottom.len > 0:
+      if tweet == nil or not replies.beginning or replyCount < tweet.stats.replies:
+        renderMore(Query(), replies.bottom, focus="#r")
 
 proc renderConversation*(conv: Conversation; prefs: Prefs; path: string): VNode =
   let hasAfter = conv.after.content.len > 0
@@ -70,6 +75,20 @@ proc renderConversation*(conv: Conversation; prefs: Prefs; path: string): VNode 
       if not conv.replies.beginning:
         renderNewer(Query(), getLink(conv.tweet), focus="#r")
       if conv.replies.content.len > 0 or conv.replies.bottom.len > 0:
-        renderReplies(conv.replies, prefs, path)
+        renderReplies(conv.replies, prefs, path, conv.tweet)
 
     renderToTop(focus="#m")
+
+proc renderEditHistory*(edits: EditHistory; prefs: Prefs; path: string): VNode =
+  buildHtml(tdiv(class="edit-history")):
+    tdiv(class="latest-edit"):
+      tdiv(class="edit-history-header"): 
+        text "Latest post"
+      renderTweet(edits.latest, prefs, path)
+
+    tdiv(class="previous-edits"):
+      tdiv(class="edit-history-header"): 
+        text "Version history"
+      for tweet in edits.history:
+        tdiv(class="tweet-edit"):
+          renderTweet(tweet, prefs, path)

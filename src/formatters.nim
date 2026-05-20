@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-import strutils, strformat, times, uri, tables, xmltree, htmlparser, htmlgen
+import strutils, strformat, times, uri, tables, xmltree, htmlparser, htmlgen, math
 import std/[enumerate, re]
 import types, utils, query
 
 const
   cards = "cards.twitter.com/cards"
   tco = "https://t.co"
-  twitter = parseUri("https://twitter.com")
+  twitter = parseUri("https://x.com")
 
 let
   twRegex = re"(?<=(?<!\S)https:\/\/|(?<=\s))(www\.|mobile\.)?twitter\.com"
@@ -33,10 +33,13 @@ proc getUrlPrefix*(cfg: Config): string =
   if cfg.useHttps: https & cfg.hostname
   else: "http://" & cfg.hostname
 
-proc shortLink*(text: string; length=28): string =
-  result = text.replace(wwwRegex, "")
+proc shorten*(text: string; length=28): string =
+  result = text
   if result.len > length:
     result = result[0 ..< length] & "…"
+
+proc shortLink*(text: string; length=28): string =
+  result = text.replace(wwwRegex, "").shorten(length)
     
 proc stripHtml*(text: string; shorten=false): string =
   var html = parseHtml(text)
@@ -56,25 +59,28 @@ proc replaceUrls*(body: string; prefs: Prefs; absolute=""): string =
   result = body
 
   if prefs.replaceYouTube.len > 0 and "youtu" in result:
-    result = result.replace(ytRegex, prefs.replaceYouTube)
+    let youtubeHost = strip(prefs.replaceYouTube, chars={'/'})
+    result = result.replace(ytRegex, youtubeHost)
 
   if prefs.replaceTwitter.len > 0:
+    let twitterHost = strip(prefs.replaceTwitter, chars={'/'})
     if tco in result:
-      result = result.replace(tco, https & prefs.replaceTwitter & "/t.co")
+      result = result.replace(tco, https & twitterHost & "/t.co")
     if "x.com" in result:
-      result = result.replace(xRegex, prefs.replaceTwitter)
+      result = result.replace(xRegex, twitterHost)
       result = result.replacef(xLinkRegex, a(
-        prefs.replaceTwitter & "$2", href = https & prefs.replaceTwitter & "$1"))
+        twitterHost & "$2", href = https & twitterHost & "$1"))
     if "twitter.com" in result:
-      result = result.replace(cards, prefs.replaceTwitter & "/cards")
-      result = result.replace(twRegex, prefs.replaceTwitter)
+      result = result.replace(cards, twitterHost & "/cards")
+      result = result.replace(twRegex, twitterHost)
       result = result.replacef(twLinkRegex, a(
-        prefs.replaceTwitter & "$2", href = https & prefs.replaceTwitter & "$1"))
+        twitterHost & "$2", href = https & twitterHost & "$1"))
 
   if prefs.replaceReddit.len > 0 and ("reddit.com" in result or "redd.it" in result):
-    result = result.replace(rdShortRegex, prefs.replaceReddit & "/comments/")
-    result = result.replace(rdRegex, prefs.replaceReddit)
-    if prefs.replaceReddit in result and "/gallery/" in result:
+    let redditHost = strip(prefs.replaceReddit, chars={'/'})
+    result = result.replace(rdShortRegex, redditHost & "/comments/")
+    result = result.replace(rdRegex, redditHost)
+    if redditHost in result and "/gallery/" in result:
       result = result.replace("/gallery/", "/comments/")
 
   if absolute.len > 0 and "href" in result:
@@ -85,7 +91,17 @@ proc getM3u8Url*(content: string): string =
   if re.find(content, m3u8Regex, matches) != -1:
     result = matches[0]
 
-proc proxifyVideo*(manifest: string; proxy: bool): string =
+proc proxifyVideo*(manifest: string; proxy: bool; manifestUrl = ""): string =
+  let (baseUrl, basePath) =
+    if manifestUrl.len > 0:
+      let
+        u = parseUri(manifestUrl)
+        origin = u.scheme & "://" & u.hostname
+        idx = manifestUrl.rfind('/')
+        dirPath = if idx > 8: manifestUrl[0 .. idx] else: ""
+      (origin, dirPath)
+    else:
+      ("https://video.twimg.com", "")
   var replacements: seq[(string, string)]
   for line in manifest.splitLines:
     let url =
@@ -93,9 +109,13 @@ proc proxifyVideo*(manifest: string; proxy: bool): string =
       elif line.startsWith("#EXT-X-MEDIA") and "URI=" in line:
         line[line.find("URI=") + 5 .. -1 + line.find("\"", start= 5 + line.find("URI="))]
       else: line
-    if url.startsWith('/'):
-      let path = "https://video.twimg.com" & url
-      replacements.add (url, if proxy: path.getVidUrl else: path)
+    let resolved =
+      if url.startsWith('/'): baseUrl & url
+      elif basePath.len > 0 and url.len > 0 and not url.startsWith('#') and
+           not url.startsWith("http") and ('.' in url): basePath & url
+      else: ""
+    if resolved.len > 0:
+      replacements.add (url, if proxy: resolved.getVidUrl else: resolved)
   return manifest.multiReplace(replacements)
 
 proc getUserPic*(userPic: string; style=""): string =
@@ -148,13 +168,30 @@ proc getShortTime*(tweet: Tweet): string =
   else:
     result = "now"
 
+proc getDuration*(ms: int): string =
+  let
+    sec = int(round(ms / 1000))
+    min = floorDiv(sec, 60)
+    hour = floorDiv(min, 60)
+  if hour > 0:
+    &"{hour}:{min mod 60:02}:{sec mod 60:02}"
+  else:
+    &"{min mod 60}:{sec mod 60:02}"
+
+proc getDuration*(video: Video): string =
+  getDuration(video.durationMs)
+
+proc getLink*(id: int64; username="i"; focus=true): string =
+  var username = username
+  if username.len == 0:
+    username = "i"
+  result = &"/{username}/status/{id}"
+  if focus: result &= "#m"
+
 proc getLink*(tweet: Tweet; focus=true): string =
   if tweet.id == 0: return
   var username = tweet.user.username
-  if username.len == 0:
-    username = "i"
-  result = &"/{username}/status/{tweet.id}"
-  if focus: result &= "#m"
+  return getLink(tweet.id, username, focus)
 
 proc getTwitterLink*(path: string; params: Table[string, string]): string =
   var
@@ -182,7 +219,7 @@ proc getTwitterLink*(path: string; params: Table[string, string]): string =
 proc getLocation*(u: User | Tweet): (string, string) =
   if "://" in u.location: return (u.location, "")
   let loc = u.location.split(":")
-  let url = if loc.len > 1: "/search?q=place:" & loc[1] else: ""
+  let url = if loc.len > 1: "/search?f=tweets&q=place:" & loc[1] else: ""
   (loc[0], url)
 
 proc getSuspended*(username: string): string =
