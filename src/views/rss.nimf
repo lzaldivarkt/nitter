@@ -17,6 +17,11 @@
 ##  text = unicode.runeSubStr(text, 0, 32) & "..."
 ##end if
 #text = xmltree.escape(text)
+## article tweets' text is just the article link; the title says more
+#if tweet.articlePreview.isSome and tweet.articlePreview.get().title.len > 0:
+#  result = prefix & xmltree.escape(tweet.articlePreview.get().title)
+#  return
+#end if
 #if text.len > 0:
 #  result = prefix & text
 #  return
@@ -32,12 +37,6 @@
 #    of videoMedia: result &= "Video"
 #    of gifMedia:   result &= "Gif"
 #    end case
-#  end if
-#end if
-#if result.len == 0 and tweet.articlePreview.isSome:
-#  let art = tweet.articlePreview.get()
-#  if art.title.len > 0:
-#    result = prefix & xmltree.escape(art.title)
 #  end if
 #end if
 #if result.len == 0 and tweet.card.isSome:
